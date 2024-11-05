@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 from ..tresnet import TResnetM, TResnetL, TResnetXL
 
 
-def create_model(args,load_head=False):
+def create_model(args, load_head=False, key=None):
     """Create a model
     """
     model_params = {'args': args, 'num_classes': args.num_classes}

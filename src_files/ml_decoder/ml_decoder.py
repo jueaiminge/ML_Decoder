@@ -10,7 +10,7 @@ def add_ml_decoder_head(model, num_classes=-1, num_of_groups=-1, decoder_embeddi
         num_classes = model.num_classes
     num_features = model.num_features
     if hasattr(model, 'global_pool') and hasattr(model, 'fc'):  # resnet50
-        model.global_pool = nn.Identity()
+        model.global_pool = nn.Identity()   # remove global_pool
         del model.fc
         model.fc = MLDecoder(num_classes=num_classes, initial_num_features=num_features, num_of_groups=num_of_groups,
                              decoder_embedding=decoder_embedding, zsl=zsl)
@@ -25,7 +25,6 @@ def add_ml_decoder_head(model, num_classes=-1, num_of_groups=-1, decoder_embeddi
         exit(-1)
 
     return model
-
 
 class TransformerDecoderLayerOptimal(nn.Module):
     def __init__(self, d_model, nhead=8, dim_feedforward=2048, dropout=0.1, activation="relu",
@@ -102,13 +101,13 @@ class MLDecoder(nn.Module):
     def __init__(self, num_classes, num_of_groups=-1, decoder_embedding=768,
                  initial_num_features=2048, zsl=0):
         super(MLDecoder, self).__init__()
-        embed_len_decoder = 100 if num_of_groups < 0 else num_of_groups
+        embed_len_decoder = 100 if num_of_groups < 0 else num_of_groups #解码器嵌入层的输入长度
         if embed_len_decoder > num_classes:
             embed_len_decoder = num_classes
 
         # switching to 768 initial embeddings
         decoder_embedding = 768 if decoder_embedding < 0 else decoder_embedding
-        embed_standart = nn.Linear(initial_num_features, decoder_embedding)
+        embed_standart = nn.Linear(initial_num_features, decoder_embedding) # 2048 -> 768
 
         # non-learnable queries
         if not zsl:
@@ -123,8 +122,14 @@ class MLDecoder(nn.Module):
         dim_feedforward = 2048
         layer_decode = TransformerDecoderLayerOptimal(d_model=decoder_embedding,
                                                       dim_feedforward=dim_feedforward, dropout=decoder_dropout)
+        # layer_decode = nn.TransformerDecoderLayer(
+        #     d_model=decoder_embedding,
+        #     nhead=8,
+        #     dim_feedforward=dim_feedforward,
+        #     dropout=decoder_dropout
+        # )
         self.decoder = nn.TransformerDecoder(layer_decode, num_layers=num_layers_decoder)
-        self.decoder.embed_standart = embed_standart
+        self.decoder.embed_standart = embed_standart   # 设置标准化线性层，用于标准化嵌入向量
         self.decoder.query_embed = query_embed
         self.zsl = zsl
 
@@ -139,22 +144,33 @@ class MLDecoder(nn.Module):
         else:
             # group fully-connected
             self.decoder.num_classes = num_classes
-            self.decoder.duplicate_factor = int(num_classes / embed_len_decoder + 0.999)
+            self.decoder.duplicate_factor = int(num_classes / embed_len_decoder + 0.999) # 复制池化层输出的向量的长度与输入的向量的长度的比率
             self.decoder.duplicate_pooling = torch.nn.Parameter(
                 torch.Tensor(embed_len_decoder, decoder_embedding, self.decoder.duplicate_factor))
             self.decoder.duplicate_pooling_bias = torch.nn.Parameter(torch.Tensor(num_classes))
         torch.nn.init.xavier_normal_(self.decoder.duplicate_pooling)
         torch.nn.init.constant_(self.decoder.duplicate_pooling_bias, 0)
-        self.decoder.group_fc = GroupFC(embed_len_decoder)
+        self.decoder.group_fc = GroupFC(embed_len_decoder)  # 组全连接层
         self.train_wordvecs = None
         self.test_wordvecs = None
 
     def forward(self, x):
-        if len(x.shape) == 4:  # [bs,2048, 7,7]
-            embedding_spatial = x.flatten(2).transpose(1, 2)
+        if len(x.shape) == 4:  # [16, 2048, 14, 14]
+            # 首先从维度 2 开始，将其后的所有维度展平。因此，这里将最后两个维度 (14, 14) 合并为一个维度  [16, 2048, 14, 14] -> [16, 2048, 196]
+            # 然后交换维度 1 和维度 2 的位置，[16, 2048, 196] -> [16, 196, 2048]
+            embedding_spatial = x.flatten(2).transpose(1, 2)  # [16, 196, 2048]
         else:  # [bs, 197,468]
             embedding_spatial = x
-        embedding_spatial_786 = self.decoder.embed_standart(embedding_spatial)
+        embedding_spatial_786 = self.decoder.embed_standart(embedding_spatial) # [16, 196, 2048] -> [16, 196, 768]
+        # print("start")
+        # print("x.shape:")
+        # print(x.shape)
+        # print("embedding_spatial.shape:")
+        # print(embedding_spatial.shape)
+        # print("embedding_spatial_786.shape:")
+        # print(embedding_spatial_786.shape)
+        # print("down")
+
         embedding_spatial_786 = torch.nn.functional.relu(embedding_spatial_786, inplace=True)
 
         bs = embedding_spatial_786.shape[0]
@@ -164,7 +180,10 @@ class MLDecoder(nn.Module):
             query_embed = self.decoder.query_embed.weight
         # tgt = query_embed.unsqueeze(1).repeat(1, bs, 1)
         tgt = query_embed.unsqueeze(1).expand(-1, bs, -1)  # no allocation of memory with expand
-        h = self.decoder(tgt, embedding_spatial_786.transpose(0, 1))  # [embed_len_decoder, batch, 768]
+        # 转换维度是为了满足TransformerDecoder的输入要求，要求输入shape为(序列长度,批量大小,特征维度)，即(196,16,768)
+        # - tgt: :math:`(T, E)` for unbatched input, :math:`(T, N, E)` if `batch_first=False` or
+        #               `(N, T, E)` if `batch_first=True`.
+        h = self.decoder(tgt, embedding_spatial_786.transpose(0, 1))
         h = h.transpose(0, 1)
 
         out_extrap = torch.zeros(h.shape[0], h.shape[1], self.decoder.duplicate_factor, device=h.device, dtype=h.dtype)

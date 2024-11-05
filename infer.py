@@ -21,7 +21,7 @@ import numpy as np
 
 parser = argparse.ArgumentParser(description='PyTorch MS_COCO infer')
 parser.add_argument('--num-classes', default=80, type=int)
-parser.add_argument('--model-path', type=str, default='./models_local/TRresNet_L_448_86.6.pth')
+parser.add_argument('--model-path', type=str, default='./models_zoo/tresnet_l_COCO__448_90_0.pth')
 parser.add_argument('--pic-path', type=str, default='./pics/000000000885.jpg')
 parser.add_argument('--model-name', type=str, default='tresnet_l')
 parser.add_argument('--image-size', type=int, default=448)

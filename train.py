@@ -15,22 +15,22 @@ from randaugment import RandAugment
 from torch.cuda.amp import GradScaler, autocast
 
 parser = argparse.ArgumentParser(description='PyTorch MS_COCO Training')
-parser.add_argument('--data', type=str, default='/home/MSCOCO_2014/')
+parser.add_argument('--data', type=str, default='./data/')
 parser.add_argument('--lr', default=1e-4, type=float)
 parser.add_argument('--model-name', default='tresnet_l')
 parser.add_argument('--model-path', default='https://miil-public-eu.oss-eu-central-1.aliyuncs.com/model-zoo/ML_Decoder/tresnet_l_pretrain_ml_decoder.pth', type=str)
 parser.add_argument('--num-classes', default=80)
-parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers')
 parser.add_argument('--image-size', default=448, type=int,
                     metavar='N', help='input image size (default: 448)')
-parser.add_argument('--batch-size', default=56, type=int,
+parser.add_argument('--batch-size', default=16, type=int,
                     metavar='N', help='mini-batch size')
 
 # ML-Decoder
 parser.add_argument('--use-ml-decoder', default=1, type=int)
 parser.add_argument('--num-of-groups', default=-1, type=int)  # full-decoding
-parser.add_argument('--decoder-embedding', default=768, type=int)
+parser.add_argument('--decoder-embedding', default=768, type=int)   # 解码器的嵌入向量维度
 parser.add_argument('--zsl', default=0, type=int)
 
 def main():
@@ -39,6 +39,7 @@ def main():
     # Setup model
     print('creating model {}...'.format(args.model_name))
     model = create_model(args).cuda()
+    # print("Model structure: ", model)
 
     # local_rank = torch.distributed.get_rank()
     # torch.cuda.set_device(0)
@@ -86,27 +87,34 @@ def main():
 
 
 def train_multi_label_coco(model, train_loader, val_loader, lr):
+    # 指数移动平均（EMA）：在神经网络训练中通过平滑模型参数的更新，减少噪声和波动，提高模型的稳定性与泛化能力，
+    # 从而提升模型的准确性和性能，被视为一种时间平均的模型集成方法。
     ema = ModelEma(model, 0.9997)  # 0.9997^641=0.82
 
     # set optimizer
     Epochs = 40
     weight_decay = 1e-4
+    # 不对称损失函数，主要用于处理类别不平衡问题
+    # https://arxiv.org/abs/2009.14119
     criterion = AsymmetricLoss(gamma_neg=4, gamma_pos=0, clip=0.05, disable_torch_grad_focal_loss=True)
+    # 添加权重衰减，权重衰减率为 1e-4
     parameters = add_weight_decay(model, weight_decay)
     optimizer = torch.optim.Adam(params=parameters, lr=lr, weight_decay=0)  # true wd, filter_bias_and_bn
     steps_per_epoch = len(train_loader)
     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=steps_per_epoch, epochs=Epochs,
-                                        pct_start=0.2)
+                                        pct_start=0.2) # dynamic learning rate
 
     highest_mAP = 0
     trainInfoList = []
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')  # gradient scaling
     for epoch in range(Epochs):
         for i, (inputData, target) in enumerate(train_loader):
             inputData = inputData.cuda()
+            if i == 0:
+                print("inputData.shape: ", inputData.shape)
             target = target.cuda()
             target = target.max(dim=1)[0]
-            with autocast():  # mixed precision
+            with autocast():  # 自动混合精度，提升训练效率和优化
                 output = model(inputData).float()  # sigmoid will be done in loss !
             loss = criterion(output, target)
             model.zero_grad()
@@ -114,11 +122,11 @@ def train_multi_label_coco(model, train_loader, val_loader, lr):
             scaler.scale(loss).backward()
             # loss.backward()
 
+            scheduler.step()
+
             scaler.step(optimizer)
             scaler.update()
             # optimizer.step()
-
-            scheduler.step()
 
             ema.update(model)
             # store information
@@ -126,12 +134,12 @@ def train_multi_label_coco(model, train_loader, val_loader, lr):
                 trainInfoList.append([epoch, i, loss.item()])
                 print('Epoch [{}/{}], Step [{}/{}], LR {:.1e}, Loss: {:.1f}'
                       .format(epoch, Epochs, str(i).zfill(3), str(steps_per_epoch).zfill(3),
-                              scheduler.get_last_lr()[0], \
+                              scheduler.get_last_lr()[0],
                               loss.item()))
 
         try:
             torch.save(model.state_dict(), os.path.join(
-                'models/', 'model-{}-{}.ckpt'.format(epoch + 1, i + 1)))
+                './models/', 'model-{}-{}.ckpt'.format(epoch + 1, i + 1)))
         except:
             pass
 
@@ -143,7 +151,7 @@ def train_multi_label_coco(model, train_loader, val_loader, lr):
             highest_mAP = mAP_score
             try:
                 torch.save(model.state_dict(), os.path.join(
-                    'models/', 'model-highest.ckpt'))
+                    './models/', 'model-highest.ckpt'))
             except:
                 pass
         print('current_mAP = {:.2f}, highest_mAP = {:.2f}\n'.format(mAP_score, highest_mAP))
